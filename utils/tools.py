@@ -1,23 +1,29 @@
 # tools
-import pyautogui
 import time
+
+import pyautogui
+
 import core.state as state
+
 from .log import error
 
+
 def sleep(seconds=1):
-  time.sleep(seconds * state.SLEEP_TIME_MULTIPLIER)
+    time.sleep(seconds * state.SLEEP_TIME_MULTIPLIER)
+
 
 def get_secs(seconds=1):
-  return seconds * state.SLEEP_TIME_MULTIPLIER
+    return seconds * state.SLEEP_TIME_MULTIPLIER
+
 
 def drag_scroll(mousePos, to):
-  '''to: negative to scroll down, positive to scroll up'''
-  if not state.stop_event:
-    return
-  if not to or not mousePos:
-    error("drag_scroll correct variables not supplied.")
-  pyautogui.moveTo(mousePos, duration=0.1)
-  pyautogui.mouseDown()
-  pyautogui.moveRel(0, to, duration=0.25)
-  pyautogui.mouseUp()
-  pyautogui.click()
+    """to: negative to scroll down, positive to scroll up"""
+    if not state.stop_event:
+        return
+    if not to or not mousePos:
+        error("drag_scroll correct variables not supplied.")
+    pyautogui.moveTo(mousePos, duration=0.1)
+    pyautogui.mouseDown()
+    pyautogui.moveRel(0, to, duration=0.25)
+    pyautogui.mouseUp()
+    pyautogui.click()
