@@ -1,17 +1,12 @@
-import pyautogui
-from PIL import ImageGrab
-
-from utils.tools import drag_scroll, get_secs, sleep
-
-pyautogui.useImageNotFoundException(False)
-
 import re
 
-import core.state as state
-import utils.constants as constants
+import pyautogui
+
+from core.data.config import MOOD_VALUE
 from core.events import event_choice, get_event_name
+from core.global_state import GlobalState
 from core.logic import decide_race_for_goal, do_something
-from core.recognizer import is_btn_active, multi_match_templates
+from core.recognizer import is_btn_active, match_template, multi_match_templates
 from core.skill import buy_skill
 from core.state import (
     check_aptitudes,
@@ -27,42 +22,20 @@ from core.state import (
     get_race_type,
 )
 from utils.log import debug, info, warning
+from utils.mouse import move_to, move_to_center_of_box, move_to_position
 from utils.scenario import ura
-
-templates = {
-    "event": "assets/icons/event_choice_1.png",
-    "inspiration": "assets/buttons/inspiration_btn.png",
-    "next": "assets/buttons/next_btn.png",
-    "next2": "assets/buttons/next2_btn.png",
-    "cancel": "assets/buttons/cancel_btn.png",
-    "tazuna": "assets/ui/tazuna_hint.png",
-    "infirmary": "assets/buttons/infirmary_btn.png",
-    "retry": "assets/buttons/retry_btn.png",
-}
-
-training_types = {
-    "spd": "assets/icons/train_spd.png",
-    "sta": "assets/icons/train_sta.png",
-    "pwr": "assets/icons/train_pwr.png",
-    "guts": "assets/icons/train_guts.png",
-    "wit": "assets/icons/train_wit.png",
-}
+from utils.screen import scale_value_for_screen_height
+from utils.screenshot import adjust_box_for_region, crop_image, ensure_screenshot
+from utils.tools import drag_scroll, get_secs, sleep
 
 
-def click(
-    img: str = None,
-    confidence: float = 0.8,
-    minSearch: float = 2,
-    click: int = 1,
+def click_box(
+    clicks: int = 1,
     text: str = "",
-    boxes=None,
+    boxes: list[tuple[int, int, int, int]] | tuple[int, int, int, int] | None = None,
     region=None,
 ):
-    if state.stop_event.is_set():
-        return False
-    if not state.is_bot_running:
-        return False
-
+    """Click the center of the given box, or first box if there are multiple."""
     if boxes:
         if isinstance(boxes, list):
             if len(boxes) == 0:
@@ -73,72 +46,110 @@ def click(
 
         if text:
             debug(text)
-        x, y, w, h = box
-        center = (x + w // 2, y + h // 2)
-        pyautogui.moveTo(center[0], center[1], duration=0.225)
-        pyautogui.click(clicks=click, interval=0.15)
-        return True
-
-    if img is None:
-        return False
-
-    if region:
-        btn = pyautogui.locateCenterOnScreen(img, confidence=confidence, minSearchTime=minSearch, region=region)
-    else:
-        btn = pyautogui.locateCenterOnScreen(img, confidence=confidence, minSearchTime=minSearch)
-    if btn:
-        if text:
-            debug(text)
-        pyautogui.moveTo(btn, duration=0.225)
-        pyautogui.click(clicks=click, interval=0.15)
+        if region is not None:
+            box = adjust_box_for_region(box, region)
+        move_to_center_of_box(box)
+        pyautogui.click(clicks=clicks, interval=0.15)
         return True
 
     return False
 
 
-def go_to_training():
-    return click("assets/buttons/training_btn.png")
+def click(
+    state: GlobalState,
+    img: str = None,
+    confidence: float = 0.8,
+    minSearch: float = 2,
+    clicks: int = 1,
+    text: str = "",
+    boxes=None,
+    region=None,
+    existing_screen=None,
+):
+    if not boxes:
+        if img is None:
+            return False
+        screen = ensure_screenshot(state, region, existing_screen)
+        boxes = match_template(state.asset_by_path(img), screen, threshold=confidence)
+
+    return click_box(clicks=clicks, text=text, boxes=boxes, region=region)
 
 
-def check_training():
-    if state.stop_event.is_set():
-        return {}
+def keep_try_click(
+    state: GlobalState, img: str, clicks: int = 1, interval: float = 0.5, threshold=0.8, timeout: float = 5
+) -> list:
+    """Waits for a template to be visible on the screen, then clicks it.
 
+    Checks for matches every interval seconds, up to timeout.
+    If no match is found then, an empty list is returned.
+    """
+    time_elapsed = 0.0
+    while time_elapsed <= timeout:
+        if click(state, img, clicks=clicks, confidence=threshold):
+            return True
+
+        sleep(interval)
+        time_elapsed += interval
+
+    return False
+
+
+def go_to_training(state: GlobalState):
+    return click(state, img="assets/buttons/training_btn.png")
+
+
+def check_training(state: GlobalState):
     results = {}
+
+    training_types = {
+        "spd": state.asset_by_path("assets/icons/train_spd.png"),
+        "sta": state.asset_by_path("assets/icons/train_sta.png"),
+        "pwr": state.asset_by_path("assets/icons/train_pwr.png"),
+        "guts": state.asset_by_path("assets/icons/train_guts.png"),
+        "wit": state.asset_by_path("assets/icons/train_wit.png"),
+    }
 
     # failcheck enum "train","no_train","check_all"
     failcheck = "check_all"
     margin = 5
-    for key, icon_path in training_types.items():
-        if state.stop_event.is_set():
-            return {}
+    screen = state.screenshot(region=state.data.region.SCREEN_BOTTOM_REGION)
 
-        pos = pyautogui.locateCenterOnScreen(icon_path, confidence=0.8, region=constants.SCREEN_BOTTOM_REGION)
-        if pos:
-            pyautogui.moveTo(pos, duration=0.1)
-            pyautogui.mouseDown()
-            support_card_results = check_support_card()
+    pyautogui.mouseDown()
+
+    for key, icon in training_types.items():
+
+        boxes = match_template(icon, screen, threshold=0.8)
+
+        if boxes:
+            move_to(
+                boxes[0][0] + state.data.region.SCREEN_BOTTOM_REGION.x1 + boxes[0][2] // 2,
+                boxes[0][1] + state.data.region.SCREEN_BOTTOM_REGION.y1 + boxes[0][3] // 2,
+            )
+            # Sometimes it doesn't pop up yet om
+            # sleep a little to allow for the ui to load properly
+            sleep(0.2)
+            support_card_results = check_support_card(state)
 
             if key != "wit":
                 if failcheck == "check_all":
-                    failure_chance = check_failure()
-                    if failure_chance > (state.MAX_FAILURE + margin):
+                    failure_chance = check_failure(state)
+                    if failure_chance > (state.config.maximum_failure + margin):
                         info("Failure rate too high skip to check wit")
                         failcheck = "no_train"
-                        failure_chance = state.MAX_FAILURE + margin
-                    elif failure_chance < (state.MAX_FAILURE - margin):
+                        failure_chance = state.config.maximum_failure + margin
+                    elif failure_chance < (state.config.maximum_failure - margin):
                         info("Failure rate is low enough, skipping the rest of failure checks.")
                         failcheck = "train"
                         failure_chance = 0
                 elif failcheck == "no_train":
-                    failure_chance = state.MAX_FAILURE + margin
+                    failure_chance = state.config.maximum_failure + margin
                 elif failcheck == "train":
                     failure_chance = 0
             else:
                 if failcheck == "train":
                     failure_chance = 0
                 else:
-                    failure_chance = check_failure()
+                    failure_chance = check_failure(state)
 
             support_card_results["failure"] = failure_chance
             results[key] = support_card_results
@@ -147,405 +158,416 @@ def check_training():
                 f"[{key.upper()}] → Total Supports {support_card_results['total_supports']}, Levels:{support_card_results['total_friendship_levels']} , Fail: {failure_chance}%"
             )
             sleep(0.1)
+        else:
+            warning(f"Couldn't find training icon for {key}")
 
     pyautogui.mouseUp()
-    click(img="assets/buttons/back_btn.png")
+    click(state, img="assets/buttons/back_btn.png")
     return results
 
 
-def do_train(train):
-    if state.stop_event.is_set():
+def do_train(state: GlobalState, train):
+    if click(
+        state,
+        img=f"assets/icons/train_{train}.png",
+        confidence=0.8,
+        region=state.data.region.SCREEN_BOTTOM_REGION,
+        clicks=3,
+    ):
+        pass
+    else:
+        warning(f"Couldn't find {train} training button.")
+
+
+def do_rest(state: GlobalState, energy_level):
+    if state.config.never_rest_energy > 0 and energy_level > state.config.never_rest_energy:
+        info(f"Wanted to rest when energy was above {state.config.never_rest_energy}, retrying from beginning.")
         return
-    train_btn = pyautogui.locateOnScreen(
-        f"assets/icons/train_{train}.png", confidence=0.8, region=constants.SCREEN_BOTTOM_REGION
+
+    if click(state, img="assets/buttons/rest_btn.png", confidence=0.8, region=state.data.region.SCREEN_BOTTOM_REGION):
+        pass
+    elif click(
+        state, img="assets/buttons/rest_summer_btn.png", confidence=0.8, region=state.data.region.SCREEN_BOTTOM_REGION
+    ):
+        pass
+    else:
+        warning("Couldn't find rest button.")
+
+
+def do_recreation(state: GlobalState):
+    if click(
+        state, img="assets/buttons/recreation_btn.png", confidence=0.8, region=state.data.region.SCREEN_BOTTOM_REGION
+    ):
+        pass
+    elif click(
+        state, img="assets/buttons/rest_summer_btn.png", confidence=0.8, region=state.data.region.SCREEN_BOTTOM_REGION
+    ):
+        pass
+    else:
+        warning("Couldn't find recreation button.")
+
+
+def do_race(state: GlobalState, race=None):
+    click(state, img="assets/buttons/races_btn.png")
+
+    consecutive_cancel_btn_box = match_template(
+        state.asset_by_path("assets/buttons/cancel_btn.png"), state.screenshot(), threshold=0.8
     )
-    if train_btn:
-        click(boxes=train_btn, click=3)
-
-
-def do_rest(energy_level):
-    if state.stop_event.is_set():
-        return
-    if state.NEVER_REST_ENERGY > 0 and energy_level > state.NEVER_REST_ENERGY:
-        info(f"Wanted to rest when energy was above {state.NEVER_REST_ENERGY}, retrying from beginning.")
-        return
-    rest_btn = pyautogui.locateOnScreen(
-        "assets/buttons/rest_btn.png", confidence=0.8, region=constants.SCREEN_BOTTOM_REGION
-    )
-    rest_summber_btn = pyautogui.locateOnScreen(
-        "assets/buttons/rest_summer_btn.png", confidence=0.8, region=constants.SCREEN_BOTTOM_REGION
-    )
-
-    if rest_btn:
-        click(boxes=rest_btn)
-    elif rest_summber_btn:
-        click(boxes=rest_summber_btn)
-
-
-def do_recreation():
-    if state.stop_event.is_set():
-        return
-    recreation_btn = pyautogui.locateOnScreen(
-        "assets/buttons/recreation_btn.png", confidence=0.8, region=constants.SCREEN_BOTTOM_REGION
-    )
-    recreation_summer_btn = pyautogui.locateOnScreen(
-        "assets/buttons/rest_summer_btn.png", confidence=0.8, region=constants.SCREEN_BOTTOM_REGION
-    )
-
-    if recreation_btn:
-        click(boxes=recreation_btn)
-    elif recreation_summer_btn:
-        click(boxes=recreation_summer_btn)
-
-
-def do_race(prioritize_g1=False, img=None):
-    if state.stop_event.is_set():
-        return False
-    click(img="assets/buttons/races_btn.png", minSearch=get_secs(10))
-
-    consecutive_cancel_btn = pyautogui.locateCenterOnScreen(
-        "assets/buttons/cancel_btn.png", minSearchTime=get_secs(0.7), confidence=0.8
-    )
-    if state.CANCEL_CONSECUTIVE_RACE and consecutive_cancel_btn:
-        click(
-            img="assets/buttons/cancel_btn.png",
+    if state.config.cancel_consecutive_race and consecutive_cancel_btn_box:
+        click_box(
+            boxes=consecutive_cancel_btn_box,
             text="[INFO] Already raced 3+ times consecutively. Cancelling race and doing training.",
         )
         return False
-    elif not state.CANCEL_CONSECUTIVE_RACE and consecutive_cancel_btn:
-        click(img="assets/buttons/ok_btn.png", minSearch=get_secs(0.7))
+    elif not state.config.cancel_consecutive_race and consecutive_cancel_btn_box:
+        click(state, img="assets/buttons/ok_btn.png")
 
     sleep(0.7)
-    found = race_select(prioritize_g1=prioritize_g1, img=img)
+    found = race_select(state, race=race)
     if not found:
-        if img is not None:
-            info(f"{img} not found.")
+        if race is not None:
+            info(f"{race} not found.")
         else:
             info("Race not found.")
         return False
 
-    race_prep()
+    race_prep(state)
     sleep(1)
-    after_race()
+    after_race(state)
     return True
 
 
-def select_event():
-    event_choices_icon = pyautogui.locateOnScreen(
-        "assets/icons/event_choice_1.png", confidence=0.9, minSearchTime=0.2, region=constants.GAME_SCREEN_REGION
+def select_event(state: GlobalState):
+    event_choices_icon_box = match_template(
+        state.asset_by_path("assets/icons/event_choice_1.png"),
+        state.screenshot(state.data.region.GAME_SCREEN_REGION),
+        threshold=0.9,
     )
-    choice_vertical_gap = 112
+    choice_vertical_gap = scale_value_for_screen_height(224, state.game_window.height)
 
-    if not event_choices_icon:
+    if not event_choices_icon_box:
         return False
 
-    if not state.USE_OPTIMAL_EVENT_CHOICE:
-        click(boxes=event_choices_icon, text="Event found, selecting top choice.")
+    if not state.config.event.use_optimal_event_choice:
+        click_box(
+            boxes=event_choices_icon_box,
+            text="Event found, selecting top choice.",
+            region=state.data.region.GAME_SCREEN_REGION,
+        )
         return True
 
-    event_name = get_event_name()
+    event_name = get_event_name(state)
 
-    chosen = event_choice(event_name)
+    chosen = event_choice(state, event_name)
     if chosen == 0:
-        click(boxes=event_choices_icon, text="Event found, selecting top choice.")
+        click_box(
+            boxes=event_choices_icon_box,
+            text="Event found, selecting top choice.",
+            region=state.data.region.GAME_SCREEN_REGION,
+        )
         return True
 
-    x = event_choices_icon[0]
-    y = event_choices_icon[1] + ((chosen - 1) * choice_vertical_gap)
-    debug(f"Event choices coordinates: {event_choices_icon}")
+    x = event_choices_icon_box[0][0]
+    y = event_choices_icon_box[0][1] + ((chosen - 1) * choice_vertical_gap)
+    debug(f"Event choices coordinates: {event_choices_icon_box[0]}")
     debug(f"Clicking: {x}, {y}")
-    click(boxes=(x, y, 1, 1), text=f"Selecting optimal choice: {event_name}")
+    click_box(
+        boxes=(x, y, 1, 1), text=f"Selecting optimal choice: {event_name}", region=state.data.region.GAME_SCREEN_REGION
+    )
     return True
 
 
-def race_day():
-    if state.stop_event.is_set():
-        return
-    click(img="assets/buttons/race_day_btn.png", minSearch=get_secs(10), region=constants.SCREEN_BOTTOM_REGION)
+def race_day(state: GlobalState):
+    keep_try_click(state, img="assets/buttons/race_day_btn.png")
 
-    click(img="assets/buttons/ok_btn.png")
+    click(state, img="assets/buttons/ok_btn.png")
     sleep(0.5)
 
     # move mouse off the race button so that image can be matched
     #  pyautogui.moveTo(x=400, y=400)
 
-    for i in range(2):
-        if state.stop_event.is_set():
-            return
-        if not click(img="assets/buttons/race_btn.png", minSearch=get_secs(2)):
-            click(img="assets/buttons/bluestacks/race_btn.png", minSearch=get_secs(2))
-        sleep(0.5)
-
-    race_prep()
+    race_prep(state)
     sleep(1)
-    after_race()
+    after_race(state)
 
 
-def race_select(prioritize_g1=False, img=None):
-    if state.stop_event.is_set():
-        return False
-    pyautogui.moveTo(constants.SCROLLING_SELECTION_MOUSE_POS)
+def race_select(state: GlobalState, race=None):
+    move_to_position(state.data.region.SCROLLING_SELECTION_MOUSE_POS)
 
     sleep(0.3)
 
-    if prioritize_g1:
-        info(f"Looking for {img}.")
+    if state.config.prioritize_g1_race and race is not None:
+        info(f"Looking for {race}.")
         for i in range(2):
-            if state.stop_event.is_set():
-                return False
             if click(
-                img=f"assets/races/{img}.png",
-                minSearch=get_secs(0.7),
-                text=f"{img} found.",
-                region=constants.RACE_LIST_BOX_REGION,
+                state,
+                img=f"assets/races/{race}.png",
+                text=f"{race} found.",
+                region=state.data.region.RACE_LIST_BOX_REGION,
             ):
-                for i in range(2):
-                    if state.stop_event.is_set():
-                        return False
-                    if not click(img="assets/buttons/race_btn.png", minSearch=get_secs(2)):
-                        click(img="assets/buttons/bluestacks/race_btn.png", minSearch=get_secs(2))
-                    sleep(0.5)
                 return True
-            drag_scroll(constants.RACE_SCROLL_BOTTOM_MOUSE_POS, -270)
+            drag_scroll(state.data.region.RACE_SCROLL_BOTTOM_MOUSE_POS, -270)
 
         return False
     else:
         info("Looking for race.")
         for i in range(4):
-            if state.stop_event.is_set():
-                return False
-            match_aptitude = pyautogui.locateOnScreen(
-                "assets/ui/match_track.png", confidence=0.8, minSearchTime=get_secs(0.7)
+            screen = state.screenshot()
+            match_aptitude = match_template(
+                state.asset_by_path("assets/ui/match_track.png"),
+                screen,
+                threshold=0.8,
             )
 
             if match_aptitude:
                 # locked avg brightness = 163
                 # unlocked avg brightness = 230
-                if not is_btn_active(match_aptitude, treshold=200):
+                match_aptitude_box = crop_image(screen, match_aptitude[0])
+                if not is_btn_active(match_aptitude_box, threshold=200):
                     info("Race found, but it's locked.")
                     return False
                 info("Race found.")
-                click(boxes=match_aptitude)
-
-                for i in range(2):
-                    if state.stop_event.is_set():
-                        return False
-                    if not click(img="assets/buttons/race_btn.png", minSearch=get_secs(2)):
-                        click(img="assets/buttons/bluestacks/race_btn.png", minSearch=get_secs(2))
-                    sleep(0.5)
+                click(state, boxes=match_aptitude)
                 return True
-            drag_scroll(constants.RACE_SCROLL_BOTTOM_MOUSE_POS, -270)
+            drag_scroll(state.data.region.RACE_SCROLL_BOTTOM_MOUSE_POS, -270)
 
         return False
 
 
-def race_prep():
-    global PREFERRED_POSITION_SET
+def race_prep(state: GlobalState):
+    # om
+    if not keep_try_click(state, img="assets/buttons/race_btn.png"):
+        warning("Where first race button?")
+    if not keep_try_click(state, img="assets/buttons/race_btn.png"):
+        warning("Where second race button?")
 
-    if state.stop_event.is_set():
-        return
-
-    if state.POSITION_SELECTION_ENABLED:
+    if state.config.position_selection_enabled:
         # these two are mutually exclusive, so we only use preferred position if positions by race is not enabled.
-        if state.ENABLE_POSITIONS_BY_RACE:
-            click(img="assets/buttons/info_btn.png", minSearch=get_secs(5), region=constants.SCREEN_TOP_REGION)
+        if state.config.enable_positions_by_race:
+            click(state, img="assets/buttons/info_btn.png", region=state.data.region.SCREEN_TOP_REGION)
             sleep(0.5)
             # find race text, get part inside parentheses using regex, strip whitespaces and make it lowercase for our usage
-            race_info_text = get_race_type()
+            race_info_text = get_race_type(state)
             match_race_type = re.search(r"\(([^)]+)\)", race_info_text)
             race_type = match_race_type.group(1).strip().lower() if match_race_type else None
-            click(img="assets/buttons/close_btn.png", minSearch=get_secs(2), region=constants.SCREEN_BOTTOM_REGION)
+            click(state, img="assets/buttons/close_btn.png", region=state.data.region.SCREEN_BOTTOM_REGION)
 
-            if race_type != None:
-                position_for_race = state.POSITIONS_BY_RACE[race_type]
+            if race_type is not None:
+                position_for_race = state.config.positions_by_race[race_type].value
                 info(f"Selecting position {position_for_race} based on race type {race_type}")
-                click(img="assets/buttons/change_btn.png", minSearch=get_secs(4), region=constants.SCREEN_MIDDLE_REGION)
                 click(
+                    state,
+                    img="assets/buttons/change_btn.png",
+                    region=state.data.region.SCREEN_MIDDLE_REGION,
+                )
+                click(
+                    state,
                     img=f"assets/buttons/positions/{position_for_race}_position_btn.png",
-                    minSearch=get_secs(2),
-                    region=constants.SCREEN_MIDDLE_REGION,
+                    region=state.data.region.SCREEN_MIDDLE_REGION,
                 )
                 click(
-                    img="assets/buttons/confirm_btn.png", minSearch=get_secs(2), region=constants.SCREEN_MIDDLE_REGION
+                    state,
+                    img="assets/buttons/confirm_btn.png",
+                    region=state.data.region.SCREEN_MIDDLE_REGION,
                 )
-        elif not PREFERRED_POSITION_SET:
-            click(img="assets/buttons/change_btn.png", minSearch=get_secs(6), region=constants.SCREEN_MIDDLE_REGION)
+        elif not state.memo.preferred_position_set:
+            click(state, img="assets/buttons/change_btn.png", region=state.data.region.SCREEN_MIDDLE_REGION)
             click(
-                img=f"assets/buttons/positions/{state.PREFERRED_POSITION}_position_btn.png",
-                minSearch=get_secs(2),
-                region=constants.SCREEN_MIDDLE_REGION,
+                state,
+                img=f"assets/buttons/positions/{state.config.preferred_position.value}_position_btn.png",
+                region=state.data.region.SCREEN_MIDDLE_REGION,
             )
-            click(img="assets/buttons/confirm_btn.png", minSearch=get_secs(2), region=constants.SCREEN_MIDDLE_REGION)
-            PREFERRED_POSITION_SET = True
+            click(state, img="assets/buttons/confirm_btn.png", region=state.data.region.SCREEN_MIDDLE_REGION)
+            state.memo.preferred_position_set = True
 
-    view_result_btn = pyautogui.locateCenterOnScreen(
-        "assets/buttons/view_results.png",
-        confidence=0.8,
-        minSearchTime=get_secs(10),
-        region=constants.SCREEN_BOTTOM_REGION,
-    )
-    click("assets/buttons/view_results.png", click=3)
+    # view_results_screen = state.screenshot(state.data.region.SCREEN_BOTTOM_REGION)
+    # cv2.imwrite("debug/view_results_screen.png", view_results_screen)
+    # view_results_template = state.asset_by_path("assets/buttons/view_results.png")
+    # cv2.imwrite("debug/view_results_template.png", cv2.cvtColor(view_results_template, cv2.COLOR_RGB2GRAY))
+    # view_results_boxes = match_template(view_results_template, view_results_screen)
+
+    if not keep_try_click(state, img="assets/buttons/view_results.png", clicks=3):
+        warning("Couldn't find view results button to click")
+
     sleep(0.5)
     pyautogui.click()
     sleep(0.1)
-    pyautogui.moveTo(constants.SCROLLING_SELECTION_MOUSE_POS)
+    move_to_position(state.data.region.SCROLLING_SELECTION_MOUSE_POS)
+
     for i in range(2):
-        if state.stop_event.is_set():
-            return
         pyautogui.tripleClick(interval=0.2)
         sleep(0.5)
     pyautogui.click()
-    next_button = pyautogui.locateCenterOnScreen(
-        "assets/buttons/next_btn.png", confidence=0.9, minSearchTime=get_secs(4), region=constants.SCREEN_BOTTOM_REGION
+    next_button_boxes = match_template(
+        state.asset_by_path("assets/buttons/next_btn.png"),
+        state.screenshot(state.data.region.SCREEN_BOTTOM_REGION),
+        threshold=0.9,
     )
-    if not next_button:
-        info(f"Wouldn't be able to move onto the after race since there's no next button.")
+    if not next_button_boxes:
+        info("Wouldn't be able to move onto the after race since there's no next button.")
         if click(
-            "assets/buttons/race_btn.png", confidence=0.8, minSearch=get_secs(10), region=constants.SCREEN_BOTTOM_REGION
+            state, img="assets/buttons/race_btn.png", confidence=0.8, region=state.data.region.SCREEN_BOTTOM_REGION
         ):
             info(f"Went into the race, sleep for {get_secs(10)} seconds to allow loading.")
             sleep(10)
-            if not click("assets/buttons/race_exclamation_btn.png", confidence=0.8, minSearch=get_secs(10)):
+            race_screen = state.screenshot()
+            if not click(
+                state, img="assets/buttons/race_exclamation_btn.png", confidence=0.8, existing_screen=race_screen
+            ):
                 info('Couldn\'t find "Race!" button, looking for alternative version.')
-                click("assets/buttons/race_exclamation_btn_portrait.png", confidence=0.8, minSearch=get_secs(10))
-            sleep(0.5)
-            skip_btn = pyautogui.locateOnScreen(
-                "assets/buttons/skip_btn.png",
-                confidence=0.8,
-                minSearchTime=get_secs(2),
-                region=constants.SCREEN_BOTTOM_REGION,
-            )
-            skip_btn_big = pyautogui.locateOnScreen(
-                "assets/buttons/skip_btn_big.png",
-                confidence=0.8,
-                minSearchTime=get_secs(2),
-                region=constants.SKIP_BTN_BIG_REGION_LANDSCAPE,
-            )
-            if not skip_btn_big and not skip_btn:
-                warning("Coulnd't find skip buttons at first search.")
-                skip_btn = pyautogui.locateOnScreen(
-                    "assets/buttons/skip_btn.png",
+                click(
+                    state,
+                    img="assets/buttons/race_exclamation_btn_portrait.png",
                     confidence=0.8,
-                    minSearchTime=get_secs(10),
-                    region=constants.SCREEN_BOTTOM_REGION,
+                    existing_screen=race_screen,
                 )
-                skip_btn_big = pyautogui.locateOnScreen(
-                    "assets/buttons/skip_btn_big.png",
-                    confidence=0.8,
-                    minSearchTime=get_secs(10),
-                    region=constants.SKIP_BTN_BIG_REGION_LANDSCAPE,
-                )
-            if skip_btn:
-                click(boxes=skip_btn, click=3)
-            if skip_btn_big:
-                click(boxes=skip_btn_big, click=3)
-            sleep(3)
-            if skip_btn:
-                click(boxes=skip_btn, click=3)
-            if skip_btn_big:
-                click(boxes=skip_btn_big, click=3)
             sleep(0.5)
-            if skip_btn:
-                click(boxes=skip_btn, click=3)
-            if skip_btn_big:
-                click(boxes=skip_btn_big, click=3)
-            sleep(3)
-            skip_btn = pyautogui.locateOnScreen(
-                "assets/buttons/skip_btn.png",
-                confidence=0.8,
-                minSearchTime=get_secs(5),
-                region=constants.SCREEN_BOTTOM_REGION,
+
+            look_for_skip_screen = state.screenshot()
+
+            skip_btn_boxes = match_template(
+                state.asset_by_path("assets/buttons/skip_btn.png"),
+                crop_image(look_for_skip_screen, state.data.region.SCREEN_BOTTOM_REGION),
+                threshold=0.8,
             )
-            click(boxes=skip_btn, click=3)
+            skip_btn_big_boxes = match_template(
+                state.asset_by_path("assets/buttons/skip_btn_big.png"),
+                crop_image(look_for_skip_screen, state.data.region.SKIP_BTN_BIG_REGION_LANDSCAPE),
+                threshold=0.8,
+            )
+
+            # TODO: original implementation uses pyautogui.locateOnScreen, which takes multiple screenshots internally.
+            # see if we need to do this, though I suspect one screenshot is enough.
+
+            # Also not sure why we're clicking infinite here. I guess since this is logic for actually watching the race
+            if skip_btn_boxes:
+                click_box(boxes=skip_btn_boxes, clicks=3)
+            if skip_btn_big_boxes:
+                click_box(boxes=skip_btn_big_boxes, clicks=3)
+            sleep(3)
+            if skip_btn_boxes:
+                click_box(boxes=skip_btn_boxes, clicks=3)
+            if skip_btn_big_boxes:
+                click_box(boxes=skip_btn_big_boxes, clicks=3)
+            sleep(0.5)
+            if skip_btn_boxes:
+                click_box(boxes=skip_btn_boxes, clicks=3)
+            if skip_btn_big_boxes:
+                click_box(boxes=skip_btn_big_boxes, clicks=3)
+            sleep(3)
+
+            skip_btn_boxes = match_template(
+                state.asset_by_path("assets/buttons/skip_btn.png"),
+                state.screenshot(state.data.region.SCREEN_BOTTOM_REGION),
+                threshold=0.8,
+            )
+            click_box(boxes=skip_btn_boxes, clicks=3)
             # since we didn't get the trophy before, if we get it we close the trophy
-            close_btn = pyautogui.locateOnScreen(
-                "assets/buttons/close_btn.png", confidence=0.8, minSearchTime=get_secs(5)
+            close_btn_boxes = match_template(
+                state.asset_by_path("assets/buttons/close_btn.png"), state.screenshot(), threshold=0.8
             )
-            click(boxes=close_btn, click=3)
+            click_box(boxes=close_btn_boxes, clicks=3)
             info("Finished race skipping job.")
 
 
-def after_race():
-    if state.stop_event.is_set():
-        return
-    click(img="assets/buttons/next_btn.png", minSearch=get_secs(5))
+def after_race(state: GlobalState, existing_screen=None):
+    click(state, img="assets/buttons/next_btn.png", existing_screen=existing_screen)
     sleep(0.3)
     pyautogui.click()
-    click(img="assets/buttons/next2_btn.png", minSearch=get_secs(5))
+    click(state, img="assets/buttons/next2_btn.png", existing_screen=existing_screen)
 
 
-def auto_buy_skill():
-    if state.stop_event.is_set():
-        return
-    if check_skill_pts() < state.SKILL_PTS_CHECK:
+def auto_buy_skill(state: GlobalState, existing_screen=None):
+    if check_skill_pts(state) < state.config.skill.skill_pts_check:
         return
 
-    click(img="assets/buttons/skills_btn.png")
+    click(state, img="assets/buttons/skills_btn.png", existing_screen=existing_screen)
     info("Buying skills")
     sleep(0.5)
 
-    if buy_skill():
-        pyautogui.locateCenterOnScreen("assets/buttons/confirm_btn.png")
-        click(img="assets/buttons/confirm_btn.png", minSearch=get_secs(1), region=constants.SCREEN_BOTTOM_REGION)
-        sleep(0.5)
-        click(img="assets/buttons/learn_btn.png", minSearch=get_secs(1), region=constants.SCREEN_BOTTOM_REGION)
-        sleep(0.5)
-        click(img="assets/buttons/close_btn.png", minSearch=get_secs(2), region=constants.SCREEN_MIDDLE_REGION)
-        sleep(0.5)
-        click(img="assets/buttons/back_btn.png")
+    if buy_skill(state):
+        keep_try_click(
+            state,
+            img="assets/buttons/confirm_btn.png",
+        )
+        keep_try_click(
+            state,
+            img="assets/buttons/learn_btn.png",
+        )
+        keep_try_click(
+            state,
+            img="assets/buttons/close_btn.png",
+        )
+        keep_try_click(state, img="assets/buttons/back_btn.png")
     else:
         info("No matching skills found. Going back.")
-        click(img="assets/buttons/back_btn.png")
+        keep_try_click(state, img="assets/buttons/back_btn.png")
 
 
-PREFERRED_POSITION_SET = False
-
-
-def career_lobby():
+def career_lobby(state: GlobalState):
     # Program start
-    global PREFERRED_POSITION_SET
-    PREFERRED_POSITION_SET = False
-    while state.is_bot_running and not state.stop_event.is_set():
-        screen = ImageGrab.grab()
-        matches = multi_match_templates(templates, screen=screen)
 
-        if select_event():
+    templates = {
+        "event": state.asset_by_path("assets/icons/event_choice_1.png"),
+        "inspiration": state.asset_by_path("assets/buttons/inspiration_btn.png"),
+        "next": state.asset_by_path("assets/buttons/next_btn.png"),
+        "next2": state.asset_by_path("assets/buttons/next2_btn.png"),
+        "cancel": state.asset_by_path("assets/buttons/cancel_btn.png"),
+        "tazuna": state.asset_by_path("assets/ui/tazuna_hint.png"),
+        "infirmary": state.asset_by_path("assets/buttons/infirmary_btn.png"),
+        "retry": state.asset_by_path("assets/buttons/retry_btn.png"),
+    }
+
+    while state.bot.is_bot_running and not state.bot.stop_event.is_set():
+        screen = state.screenshot()
+        matches = multi_match_templates(templates, screen=screen)
+        # Image.fromarray(screen).show()
+
+        if select_event(state):
+            debug("Event selected.")
             continue
-        if click(boxes=matches["inspiration"], text="Inspiration found."):
+        if click_box(boxes=matches["inspiration"], text="Inspiration found."):
+            debug("Getting inspiration boost.")
             continue
-        if click(boxes=matches["next"]):
+        if click_box(boxes=matches["next"]):
+            debug("Next!")
             continue
-        if click(boxes=matches["next2"]):
+        if click_box(boxes=matches["next2"]):
+            debug("Next!")
             continue
-        if click(boxes=matches["cancel"]):
+        if click_box(boxes=matches["cancel"]):
+            debug("Cancelling...")
             continue
-        if click(boxes=matches["retry"]):
+        if click_box(boxes=matches["retry"]):
+            debug("Retrying...")
             continue
 
         if not matches["tazuna"]:
-            # info("Should be in career lobby.")
+            # warning("Should be in career lobby.")
             print(".", end="")
             continue
 
-        energy_level, max_energy = check_energy_level()
+        energy_level, max_energy = check_energy_level(state)
 
         skipped_infirmary = False
-        if matches["infirmary"] and is_btn_active(matches["infirmary"][0]):
-            # infirmary always gives 20 energy, it's better to spend energy before going to the infirmary 99% of the time.
-            if max(0, (max_energy - energy_level)) >= state.SKIP_INFIRMARY_UNLESS_MISSING_ENERGY:
-                click(boxes=matches["infirmary"][0], text="Character debuffed, going to infirmary.")
-                continue
-            else:
-                info("Skipping infirmary because of high energy.")
-                skipped_infirmary = True
+        if matches["infirmary"]:
+            infirmary_button = crop_image(screen, matches["infirmary"][0])
+            if is_btn_active(infirmary_button):
+                # infirmary always gives 20 energy, it's better to spend energy before going to the infirmary 99% of the time.
+                if max(0, (max_energy - energy_level)) >= state.config.skip_infirmary_unless_missing_energy:
+                    click(state, boxes=matches["infirmary"][0], text="Character debuffed, going to infirmary.")
+                    continue
+                else:
+                    info("Skipping infirmary because of high energy.")
+                    skipped_infirmary = True
 
-        mood = check_mood()
-        mood_index = constants.MOOD_LIST.index(mood)
-        minimum_mood = constants.MOOD_LIST.index(state.MINIMUM_MOOD)
-        minimum_mood_junior_year = constants.MOOD_LIST.index(state.MINIMUM_MOOD_JUNIOR_YEAR)
-        turn = check_turn()
-        year = check_current_year()
-        criteria = check_criteria()
+        mood = check_mood(state, screen)
+        mood_index = MOOD_VALUE[mood]
+        minimum_mood = MOOD_VALUE[state.config.minimum_mood]
+        minimum_mood_junior_year = MOOD_VALUE[state.config.minimum_mood_junior_year]
+        turn = check_turn(state, screen)
+        year = check_current_year(state, screen)
+        criteria = check_criteria(state, screen)
         year_parts = year.split(" ")
 
         print("\n=======================================================================================\n")
@@ -558,25 +580,21 @@ def career_lobby():
         # URA SCENARIO
         if year == "Finale Season" and turn == "Race Day":
             info("URA Finale")
-            if state.IS_AUTO_BUY_SKILL:
-                auto_buy_skill()
-            ura()
-            for i in range(2):
-                if not click(img="assets/buttons/race_btn.png", minSearch=get_secs(2)):
-                    click(img="assets/buttons/bluestacks/race_btn.png", minSearch=get_secs(2))
-                sleep(0.5)
+            if state.config.skill.is_auto_buy_skill:
+                auto_buy_skill(state, screen)
+            ura(state, screen)
 
-            race_prep()
+            race_prep(state)
             sleep(1)
-            after_race()
+            after_race(state)
             continue
 
         # If calendar is race day, do race
         if turn == "Race Day" and year != "Finale Season":
             info("Race Day.")
-            if state.IS_AUTO_BUY_SKILL and year_parts[0] != "Junior":
-                auto_buy_skill()
-            race_day()
+            if state.config.skill.is_auto_buy_skill and year_parts[0] != "Junior":
+                auto_buy_skill(state, screen)
+            race_day(state)
             continue
 
         # Mood check
@@ -587,86 +605,83 @@ def career_lobby():
         if mood_index < mood_check:
             if skipped_infirmary:
                 info("Since we skipped infirmary due to energy, check full stats for statuses.")
-                if click(img="assets/buttons/full_stats.png", minSearch=get_secs(1)):
+                if click(state, img="assets/buttons/full_stats.png"):
                     sleep(0.5)
-                    conditions, total_severity = check_status_effects()
-                    click(img="assets/buttons/close_btn.png", minSearch=get_secs(1))
+                    conditions, total_severity = check_status_effects(state)
+                    click(state, img="assets/buttons/close_btn.png")
                     if total_severity > 1:
                         info("Severe condition found, visiting infirmary even though we will waste some energy.")
-                        click(boxes=matches["infirmary"][0])
+                        click_box(boxes=matches["infirmary"][0])
                         continue
                 else:
                     warning("Coulnd't find full stats button.")
             else:
                 info("Mood is low, trying recreation to increase mood")
-                do_recreation()
+                do_recreation(state)
                 continue
 
         # If Prioritize G1 Race is true, check G1 race every turn
         if (
-            state.PRIORITIZE_G1_RACE
+            state.config.prioritize_g1_race
             and "Pre-Debut" not in year
             and len(year_parts) > 3
             and year_parts[3] not in ["Jul", "Aug"]
         ):
             race_done = False
-            for race_list in state.RACE_SCHEDULE:
-                if state.stop_event.is_set():
-                    break
-                if len(race_list):
-                    if race_list["year"] in year and race_list["date"] in year:
-                        debug(f"Race now, {race_list['name']}, {race_list['year']} {race_list['date']}")
-                        if do_race(state.PRIORITIZE_G1_RACE, img=race_list["name"]):
-                            race_done = True
-                            break
-                        else:
-                            click(
-                                img="assets/buttons/back_btn.png",
-                                minSearch=get_secs(1),
-                                text=f"{race_list['name']} race not found. Proceeding to training.",
-                            )
-                            sleep(0.5)
+            for race in state.config.race_schedule:
+                if race.year in year and race.date in year:
+                    debug(f"Race now, {race.name}, {race.year} {race.date}")
+                    if do_race(state, race=race.name):
+                        race_done = True
+                        break
+                    else:
+                        click(
+                            state,
+                            img="assets/buttons/back_btn.png",
+                            text=f"{race.name} race not found. Proceeding to training.",
+                        )
+                        sleep(0.5)
             if race_done:
                 continue
 
         # Check if we need to race for goal
-        if not "Achieved" in criteria:
-            if state.APTITUDES == {}:
+        if "Achieved" not in criteria:
+            if not state.memo.aptitudes:
                 sleep(0.1)
-                if click(img="assets/buttons/full_stats.png", minSearch=get_secs(1)):
+                if click(state, img="assets/buttons/full_stats.png"):
                     sleep(0.5)
-                    check_aptitudes()
-                    click(img="assets/buttons/close_btn.png", minSearch=get_secs(1))
+                    check_aptitudes(state)
+                    click(state, img="assets/buttons/close_btn.png")
             keywords = ("fan", "Maiden", "Progress")
 
-            prioritize_g1, race_name = decide_race_for_goal(year, turn, criteria, keywords)
+            prioritize_g1, race_name = decide_race_for_goal(state, year, turn, criteria, keywords)
             info(f"prioritize_g1: {prioritize_g1}, race_name: {race_name}")
             if race_name:
                 if race_name == "any":
-                    race_found = do_race(prioritize_g1, img=None)
+                    race_found = do_race(state, race=None)
                 else:
-                    race_found = do_race(prioritize_g1, img=race_name)
+                    race_found = do_race(state, race=race_name)
                 if race_found:
                     continue
                 else:
                     # If there is no race matching to aptitude, go back and do training instead
-                    click(img="assets/buttons/back_btn.png", minSearch=get_secs(1), text="Proceeding to training.")
+                    click(state, img="assets/buttons/back_btn.png", text="Proceeding to training.")
                     sleep(0.5)
 
         # Check training button
-        if not go_to_training():
+        if not go_to_training(state):
             debug("Training button is not found.")
             continue
 
         # Last, do training
         sleep(0.5)
-        results_training = check_training()
+        results_training = check_training(state)
 
-        best_training = do_something(results_training)
+        best_training = do_something(state, results_training)
         if best_training:
-            go_to_training()
+            go_to_training(state)
             sleep(0.5)
-            do_train(best_training)
+            do_train(state, best_training)
         else:
-            do_rest(energy_level)
+            do_rest(state, energy_level)
         sleep(1)

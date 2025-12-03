@@ -1,17 +1,16 @@
-import core.state as state
-import utils.constants as constants
-from core.state import (
-    check_aptitudes,
-    check_current_year,
-    check_energy_level,
-    stat_state,
-)
-from utils.log import debug, error, info, warning
+from functools import partial
+
+from core.data.races import Race
+from core.global_state import GlobalState
+from core.state import check_current_year, check_energy_level, stat_state
+from utils.log import debug, info
 
 
 # Get priority stat from config
-def get_stat_priority(stat_key: str) -> int:
-    return state.PRIORITY_STAT.index(stat_key) if stat_key in state.PRIORITY_STAT else 999
+def get_stat_priority(state: GlobalState, stat_key: str) -> int:
+    # TODO: what the fuck is this
+    # ????????????????????????????????????????????????????????????????????????????????????????
+    return state.config.priority_stat.index(stat_key) if stat_key in state.config.priority_stat else 999
 
 
 def check_all_elements_are_same(d):
@@ -21,30 +20,32 @@ def check_all_elements_are_same(d):
 
 # Will do train with the most support card
 # Used in the first year (aim for rainbow)
-def most_support_card(results):
+def most_support_card(state: GlobalState, results):
     # Seperate wit
     wit_data = results.get("wit")
 
     # Get all training but wit
-    non_wit_results = {k: v for k, v in results.items() if k != "wit" and int(v["failure"]) <= state.MAX_FAILURE}
+    non_wit_results = {
+        k: v for k, v in results.items() if k != "wit" and int(v["failure"]) <= state.config.maximum_failure
+    }
 
     # Check if train is bad
     all_others_bad = len(non_wit_results) == 0
-    energy_level, max_energy = check_energy_level()
-    if energy_level < state.SKIP_TRAINING_ENERGY:
+    energy_level, max_energy = check_energy_level(state)
+    if energy_level < state.config.skip_training_energy:
         info("All trainings are unsafe and WIT training won't help go back up to safe levels, resting instead.")
         return None
 
     if (
         all_others_bad
         and wit_data
-        and int(wit_data["failure"]) <= state.MAX_FAILURE
+        and int(wit_data["failure"]) <= state.config.maximum_failure
         and wit_data["total_supports"] >= 2
     ):
         info("All trainings are unsafe, but WIT is safe and has enough support cards.")
         return "wit"
 
-    filtered_results = {k: v for k, v in results.items() if int(v["failure"]) <= state.MAX_FAILURE}
+    filtered_results = {k: v for k, v in results.items() if int(v["failure"]) <= state.config.maximum_failure}
 
     if not filtered_results:
         info("No safe training found. All failure chances are too high.")
@@ -52,7 +53,8 @@ def most_support_card(results):
 
     # this is the weight adder used for skewing results of training decisions PRIORITY_EFFECTS_LIST[get_stat_priority(x[0])] * PRIORITY_WEIGHTS_LIST[priority_weight]
     # Best training
-    best_training = max(filtered_results.items(), key=training_score)
+    training_score_key = partial(training_score, state)
+    best_training = max(filtered_results.items(), key=training_score_key)
 
     best_key, best_data = best_training
 
@@ -60,19 +62,19 @@ def most_support_card(results):
         if int(best_data["failure"]) == 0:
             # WIT must be at least 2 support cards
             if best_key == "wit":
-                if energy_level > state.NEVER_REST_ENERGY:
+                if energy_level > state.config.never_rest_energy:
                     info(
-                        f"Only 1 support and it's WIT but energy is too high for resting to be worth it. Still training."
+                        "Only 1 support and it's WIT but energy is too high for resting to be worth it. Still training."
                     )
                     return "wit"
                 else:
-                    info(f"Only 1 support and it's WIT. Skipping.")
+                    info("Only 1 support and it's WIT. Skipping.")
                     return None
             info(f"Only 1 support but 0% failure. Prioritizing based on priority list: {best_key.upper()}")
             return best_key
         else:
-            if energy_level > state.NEVER_REST_ENERGY:
-                info(f"Energy is over {state.NEVER_REST_ENERGY}, train anyway.")
+            if energy_level > state.config.never_rest_energy:
+                info(f"Energy is over {state.config.never_rest_energy}, train anyway.")
                 return best_key
             else:
                 info("Low value training (only 1 support). Choosing to rest.")
@@ -87,23 +89,24 @@ def most_support_card(results):
 PRIORITY_WEIGHTS_LIST = {"HEAVY": 0.75, "MEDIUM": 0.5, "LIGHT": 0.25, "NONE": 0}
 
 
-def training_score(x):
-    global PRIORITY_WEIGHTS_LIST
-    priority_weight = PRIORITY_WEIGHTS_LIST[state.PRIORITY_WEIGHT]
+def training_score(state: GlobalState, x):
+    priority_weight = PRIORITY_WEIGHTS_LIST[state.config.priority_weight]
     base = x[1]["total_supports"]
     if x[1]["total_hints"] > 0:
         base += 0.5
-    multiplier = 1 + state.PRIORITY_EFFECTS_LIST[get_stat_priority(x[0])] * priority_weight
+    multiplier = 1 + state.config.priority_effects_mapping[get_stat_priority(state, x[0])] * priority_weight
     total = base * multiplier
 
     # Debug output
-    debug(f"{x[0]} -> base={base}, multiplier={multiplier}, total={total}, priority={get_stat_priority(x[0])}")
+    debug(f"{x[0]} -> base={base}, multiplier={multiplier}, total={total}, priority={get_stat_priority(state, x[0])}")
 
-    return (total, -get_stat_priority(x[0]))
+    return (total, -get_stat_priority(state, x[0]))
 
 
-def focus_max_friendships(results):
-    filtered_results = {stat: data for stat, data in results.items() if int(data["failure"]) <= state.MAX_FAILURE}
+def focus_max_friendships(state: GlobalState, results):
+    filtered_results = {
+        stat: data for stat, data in results.items() if int(data["failure"]) <= state.config.maximum_failure
+    }
 
     if not filtered_results:
         debug("No trainings under MAX_FAILURE, falling back to most_support_card.")
@@ -131,19 +134,20 @@ def focus_max_friendships(results):
         )
         filtered_results[stat_name]["possible_friendship"] = possible_friendship
 
-    best_key = max(filtered_results, key=lambda k: (filtered_results[k]["possible_friendship"], -get_stat_priority(k)))
+    best_key = max(
+        filtered_results, key=lambda k: (filtered_results[k]["possible_friendship"], -get_stat_priority(state, k))
+    )
     best_score = filtered_results[best_key]["possible_friendship"]
     return best_key, best_score
 
 
 # Do rainbow training
-def rainbow_training(results):
-    global PRIORITY_WEIGHTS_LIST
-    priority_weight = PRIORITY_WEIGHTS_LIST[state.PRIORITY_WEIGHT]
+def rainbow_training(state: GlobalState, results):
+    priority_weight = PRIORITY_WEIGHTS_LIST[state.config.priority_weight]
     # 2 points for rainbow supports, 1 point for normal supports, stat priority tie breaker
     rainbow_candidates = results
     for stat_name in rainbow_candidates:
-        multiplier = 1 + state.PRIORITY_EFFECTS_LIST[get_stat_priority(stat_name)] * priority_weight
+        multiplier = 1 + state.config.priority_effects_mapping[get_stat_priority(state, stat_name)] * priority_weight
         data = rainbow_candidates[stat_name]
         total_rainbow_friends = (
             data[stat_name]["friendship_levels"]["yellow"] + data[stat_name]["friendship_levels"]["max"]
@@ -160,7 +164,7 @@ def rainbow_training(results):
     rainbow_candidates = {
         stat: data
         for stat, data in results.items()
-        if int(data["failure"]) <= state.MAX_FAILURE
+        if int(data["failure"]) <= state.config.maximum_failure
         and data["rainbow_points"] >= 2
         and not (stat == "wit" and data["total_rainbow_friends"] < 1)
     }
@@ -170,13 +174,15 @@ def rainbow_training(results):
         return None
 
     # Find support card rainbow in training
-    best_rainbow = max(rainbow_candidates.items(), key=lambda x: (x[1]["rainbow_points"], -get_stat_priority(x[0])))
+    best_rainbow = max(
+        rainbow_candidates.items(), key=lambda x: (x[1]["rainbow_points"], -get_stat_priority(state, x[0]))
+    )
 
     best_key, best_data = best_rainbow
     if best_key == "wit":
         # if we get to wit, we must have at least 1 rainbow friend
         if data["total_rainbow_friends"] < 1:
-            info(f"Wit training has most rainbow points but it doesn't have any rainbow friends, skipping.")
+            info("Wit training has most rainbow points but it doesn't have any rainbow friends, skipping.")
             return None
 
     info(
@@ -185,9 +191,11 @@ def rainbow_training(results):
     return best_key
 
 
-def filter_by_stat_caps(results, current_stats):
+def filter_by_stat_caps(state: GlobalState, results, current_stats):
     return {
-        stat: data for stat, data in results.items() if current_stats.get(stat, 0) < state.STAT_CAPS.get(stat, 1200)
+        stat: data
+        for stat, data in results.items()
+        if current_stats.get(stat, 0) < state.config.stat_caps.get(stat, 1200)
     }
 
 
@@ -197,34 +205,34 @@ def all_values_equal(dictionary):
 
 
 # Decide training
-def do_something(results):
-    year = check_current_year()
-    current_stats = stat_state()
+def do_something(state: GlobalState, results):
+    year = check_current_year(state)
+    current_stats = stat_state(state)
     info(f"Current stats: {current_stats}")
 
-    filtered = filter_by_stat_caps(results, current_stats)
+    filtered = filter_by_stat_caps(state, results, current_stats)
 
     if not filtered:
         info("All stats capped or no valid training.")
         return None
 
     if "Junior Year" in year:
-        result, best_score = focus_max_friendships(filtered)
+        result, best_score = focus_max_friendships(state, filtered)
 
         # If the best option for raising friendship is just one friend, with no hint bonus
         if best_score <= 1.3:
-            return most_support_card(filtered)
+            return most_support_card(state, filtered)
 
     else:
-        result = rainbow_training(filtered)
+        result = rainbow_training(state, filtered)
         if result is None:
             info("Falling back to most_support_card because rainbow not available.")
-            return most_support_card(filtered)
+            return most_support_card(state, filtered)
     return result
 
 
 # helper functions
-def decide_race_for_goal(year, turn, criteria, keywords):
+def decide_race_for_goal(state: GlobalState, year, turn, criteria, keywords):
     no_race = False, None
     # Check if goals is not met criteria AND it is not Pre-Debut AND turn is less than 10 AND Goal is already achieved
     if year == "Junior Year Pre-Debut":
@@ -239,12 +247,13 @@ def decide_race_for_goal(year, turn, criteria, keywords):
             # check specialized goal
             if "G1" in criteria_text or "GI" in criteria_text:
                 info('Word "G1" is in criteria text.')
-                race_list = constants.RACE_LOOKUP.get(year, [])
+                race_list = state.data.races_by_turn.get(year, [])
                 if not race_list:
                     return False, None
                 else:
-                    best_race = filter_races_by_aptitude(race_list, state.APTITUDES)
-                    return True, best_race["name"]
+                    best_race = filter_races_by_aptitude(race_list, state.memo.aptitudes)
+                    if best_race:
+                        return True, best_race.race
             else:
                 return False, "any"
         else:
@@ -253,20 +262,20 @@ def decide_race_for_goal(year, turn, criteria, keywords):
     return no_race
 
 
-def filter_races_by_aptitude(race_list, aptitudes):
+def filter_races_by_aptitude(race_list: list[Race], aptitudes) -> Race | None:
     GRADE_SCORE = {"a": 2, "b": 1}
 
     results = []
     for race in race_list:
-        surface_key = f"surface_{race['terrain'].lower()}"
-        distance_key = f"distance_{race['distance']['type'].lower()}"
+        surface_key = f"surface_{race.terrain.lower()}"
+        distance_key = f"distance_{race.distance.type.lower()}"
 
         s = GRADE_SCORE.get(aptitudes.get(surface_key, ""), 0)
         d = GRADE_SCORE.get(aptitudes.get(distance_key, ""), 0)
 
         if s and d:  # both nonzero (A or B)
             score = s + d
-            results.append((score, race["fans"]["gained"], race))
+            results.append((score, race.fans.gained, race))
 
     if not results:
         return None

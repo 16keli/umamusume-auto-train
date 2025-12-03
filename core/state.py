@@ -1,108 +1,52 @@
-import json
 import re
-import threading
 from math import floor
+from string import ascii_letters
 
 import cv2
 import numpy as np
 
-import utils.constants as constants
+from core.data.config import Mood
+from core.global_state import GlobalState
 from core.ocr import extract_number, extract_text
 from core.recognizer import (
     closest_color,
     count_pixels_of_color,
-    find_color_of_pixel,
     match_template,
     multi_match_templates,
 )
 from utils.log import debug, info, warning
-from utils.screenshot import capture_region, enhanced_screenshot
-
-stop_event = threading.Event()
-is_bot_running = False
-bot_thread = None
-bot_lock = threading.Lock()
-
-MINIMUM_MOOD = None
-PRIORITIZE_G1_RACE = None
-IS_AUTO_BUY_SKILL = None
-SKILL_PTS_CHECK = None
-PRIORITY_STAT = None
-MAX_FAILURE = None
-STAT_CAPS = None
-SKILL_LIST = None
-CANCEL_CONSECUTIVE_RACE = None
-SLEEP_TIME_MULTIPLIER = 1
-
-
-def load_config():
-    with open("config.json", "r", encoding="utf-8") as file:
-        return json.load(file)
-
-
-def reload_config():
-    global PRIORITY_STAT, PRIORITY_WEIGHT, MINIMUM_MOOD, MINIMUM_MOOD_JUNIOR_YEAR, MAX_FAILURE
-    global PRIORITIZE_G1_RACE, CANCEL_CONSECUTIVE_RACE, STAT_CAPS, IS_AUTO_BUY_SKILL, SKILL_PTS_CHECK, SKILL_LIST
-    global PRIORITY_EFFECTS_LIST, SKIP_TRAINING_ENERGY, NEVER_REST_ENERGY, SKIP_INFIRMARY_UNLESS_MISSING_ENERGY, PREFERRED_POSITION
-    global ENABLE_POSITIONS_BY_RACE, POSITIONS_BY_RACE, POSITION_SELECTION_ENABLED, SLEEP_TIME_MULTIPLIER
-    global WINDOW_NAME, RACE_SCHEDULE, CONFIG_NAME, USE_OPTIMAL_EVENT_CHOICE, EVENT_CHOICES
-
-    config = load_config()
-
-    PRIORITY_STAT = config["priority_stat"]
-    PRIORITY_WEIGHT = config["priority_weight"]
-    MINIMUM_MOOD = config["minimum_mood"]
-    MINIMUM_MOOD_JUNIOR_YEAR = config["minimum_mood_junior_year"]
-    MAX_FAILURE = config["maximum_failure"]
-    PRIORITIZE_G1_RACE = config["prioritize_g1_race"]
-    CANCEL_CONSECUTIVE_RACE = config["cancel_consecutive_race"]
-    STAT_CAPS = config["stat_caps"]
-    IS_AUTO_BUY_SKILL = config["skill"]["is_auto_buy_skill"]
-    SKILL_PTS_CHECK = config["skill"]["skill_pts_check"]
-    SKILL_LIST = config["skill"]["skill_list"]
-    PRIORITY_EFFECTS_LIST = {i: v for i, v in enumerate(config["priority_weights"])}
-    SKIP_TRAINING_ENERGY = config["skip_training_energy"]
-    NEVER_REST_ENERGY = config["never_rest_energy"]
-    SKIP_INFIRMARY_UNLESS_MISSING_ENERGY = config["skip_infirmary_unless_missing_energy"]
-    PREFERRED_POSITION = config["preferred_position"]
-    ENABLE_POSITIONS_BY_RACE = config["enable_positions_by_race"]
-    POSITIONS_BY_RACE = config["positions_by_race"]
-    POSITION_SELECTION_ENABLED = config["position_selection_enabled"]
-    SLEEP_TIME_MULTIPLIER = config["sleep_time_multiplier"]
-    WINDOW_NAME = config["window_name"]
-    RACE_SCHEDULE = config["race_schedule"]
-    CONFIG_NAME = config["config_name"]
-    USE_OPTIMAL_EVENT_CHOICE = config["event"]["use_optimal_event_choice"]
-    EVENT_CHOICES = config["event"]["event_choices"]
+from utils.screen import scale_value_for_screen_height
+from utils.screenshot import adjust_box_for_region, ensure_screenshot
+from utils.tools import closest_text_match
 
 
 # Get Stat
-def stat_state():
+def stat_state(state: GlobalState):
     stat_regions = {
-        "spd": constants.SPD_STAT_REGION,
-        "sta": constants.STA_STAT_REGION,
-        "pwr": constants.PWR_STAT_REGION,
-        "guts": constants.GUTS_STAT_REGION,
-        "wit": constants.WIT_STAT_REGION,
+        "spd": state.data.region.SPD_STAT_REGION,
+        "sta": state.data.region.STA_STAT_REGION,
+        "pwr": state.data.region.PWR_STAT_REGION,
+        "guts": state.data.region.GUTS_STAT_REGION,
+        "wit": state.data.region.WIT_STAT_REGION,
     }
 
     result = {}
     for stat, region in stat_regions.items():
-        img = enhanced_screenshot(region)
+        img = state.screenshot(region)
         val = extract_number(img)
         result[stat] = val
     return result
 
 
 # Check support card in each training
-def check_support_card(threshold=0.8, target="none"):
+def check_support_card(state: GlobalState, threshold=0.8, target="none"):
     SUPPORT_ICONS = {
-        "spd": "assets/icons/support_card_type_spd.png",
-        "sta": "assets/icons/support_card_type_sta.png",
-        "pwr": "assets/icons/support_card_type_pwr.png",
-        "guts": "assets/icons/support_card_type_guts.png",
-        "wit": "assets/icons/support_card_type_wit.png",
-        "friend": "assets/icons/support_card_type_friend.png",
+        "spd": state.asset_by_path("assets/icons/support_card_type_spd.png"),
+        "sta": state.asset_by_path("assets/icons/support_card_type_sta.png"),
+        "pwr": state.asset_by_path("assets/icons/support_card_type_pwr.png"),
+        "guts": state.asset_by_path("assets/icons/support_card_type_guts.png"),
+        "wit": state.asset_by_path("assets/icons/support_card_type_wit.png"),
+        "friend": state.asset_by_path("assets/icons/support_card_type_friend.png"),
     }
 
     count_result = {}
@@ -124,8 +68,11 @@ def check_support_card(threshold=0.8, target="none"):
         count_result["total_friendship_levels"][friend_level] = 0
         count_result["hints_per_friend_level"][friend_level] = 0
 
-    hint_matches = match_template("assets/icons/support_hint.png", constants.SUPPORT_CARD_ICON_BBOX, threshold)
-    for key, icon_path in SUPPORT_ICONS.items():
+    screen = state.screenshot(region=state.data.region.SUPPORT_CARD_ICON_BBOX)
+    cv2.imwrite("debug/support_card_bbox.png", screen)
+    hint_matches = match_template(state.asset_by_path("assets/icons/support_hint.png"), screen, threshold)
+
+    for key, icon in SUPPORT_ICONS.items():
         count_result[key] = {}
         count_result[key]["supports"] = 0
         count_result[key]["hints"] = 0
@@ -134,7 +81,7 @@ def check_support_card(threshold=0.8, target="none"):
         for friend_level, color in SUPPORT_FRIEND_LEVELS.items():
             count_result[key]["friendship_levels"][friend_level] = 0
 
-        matches = match_template(icon_path, constants.SUPPORT_CARD_ICON_BBOX, threshold)
+        matches = match_template(icon, screen, threshold)
         for match in matches:
             # add the support as a specific key
             count_result[key]["supports"] += 1
@@ -145,11 +92,12 @@ def check_support_card(threshold=0.8, target="none"):
             x, y, w, h = match
             match_horizontal_middle = floor((2 * x + w) / 2)
             match_vertical_middle = floor((2 * y + h) / 2)
-            icon_to_friend_bar_distance = 66
-            bbox_left = match_horizontal_middle + constants.SUPPORT_CARD_ICON_BBOX[0]
-            bbox_top = match_vertical_middle + constants.SUPPORT_CARD_ICON_BBOX[1] + icon_to_friend_bar_distance
+            icon_to_friend_bar_distance = scale_value_for_screen_height(132, state.game_window.height)
+            bbox_left = match_horizontal_middle + state.data.region.SUPPORT_CARD_ICON_BBOX.x1
+            bbox_top = match_vertical_middle + state.data.region.SUPPORT_CARD_ICON_BBOX.y1 + icon_to_friend_bar_distance
             wanted_pixel = (bbox_left, bbox_top, bbox_left + 1, bbox_top + 1)
-            friendship_level_color = find_color_of_pixel(wanted_pixel)
+            wanted_screen = state.screenshot(region=wanted_pixel)  # TODO: consider pulling this out but I'm lazy
+            friendship_level_color = wanted_screen[0][0]
             friend_level = closest_color(SUPPORT_FRIEND_LEVELS, friendship_level_color)
             count_result[key]["friendship_levels"][friend_level] += 1
             count_result["total_friendship_levels"][friend_level] += 1
@@ -166,9 +114,12 @@ def check_support_card(threshold=0.8, target="none"):
 
 
 # Get failure chance (idk how to get energy value)
-def check_failure():
-    failure = enhanced_screenshot(constants.FAILURE_REGION)
-    failure_text = extract_text(failure).lower()
+def check_failure(state: GlobalState, existing_screen=None):
+    existing_screen = ensure_screenshot(state, state.data.region.FAILURE_REGION, existing_screen)
+    cv2.imwrite("debug/failure.png", existing_screen)
+    # Original implementation bumped the contrast here to make OCR more reliable
+    existing_screen = cv2.convertScaleAbs(existing_screen, alpha=1.5, beta=0)
+    failure_text = extract_text(existing_screen).lower()
 
     if not failure_text.startswith("failure"):
         return -1
@@ -194,27 +145,32 @@ def check_failure():
 
 
 # Check mood
-def check_mood():
-    mood = capture_region(constants.MOOD_REGION)
-    mood_text = extract_text(mood).upper()
+def check_mood(state: GlobalState, existing_screen=None):
+    existing_screen = ensure_screenshot(state, state.data.region.MOOD_REGION, existing_screen)
+    mood_text_raw = extract_text(existing_screen).upper().strip()
+    mood_text = closest_text_match(mood_text_raw, [mood.name for mood in Mood]) or Mood.UNKNOWN.name
 
-    for known_mood in constants.MOOD_LIST:
-        if known_mood in mood_text:
-            return known_mood
-
-    warning(f"Mood not recognized: {mood_text}")
-    return "UNKNOWN"
+    try:
+        return Mood[mood_text]
+    except ValueError:
+        warning(f"Mood not recognized: {mood_text_raw}")
+        return Mood.UNKNOWN
 
 
 # Check turn
-def check_turn():
-    turn = enhanced_screenshot(constants.TURN_REGION)
-    turn_text = extract_text(turn)
+def check_turn(state: GlobalState, existing_screen=None):
+    existing_screen = ensure_screenshot(state, state.data.region.TURN_REGION, existing_screen)
+    cv2.imwrite("debug/turn.png", existing_screen)
+    # Original implementation bumped the contrast here to make OCR more reliable
+    existing_screen = cv2.convertScaleAbs(existing_screen, alpha=1.5, beta=0)
+    turn_text = extract_text(existing_screen)
 
-    if "Race Day" in turn_text:
+    info(f"Read turn as {turn_text}")
+
+    if "Race Day" in turn_text or closest_text_match(turn_text, ["Race Day"], threshold=0.5):
         return "Race Day"
-
     # sometimes easyocr misreads characters instead of numbers
+
     cleaned_text = turn_text.replace("T", "1").replace("I", "1").replace("O", "0").replace("S", "5")
 
     digits_only = re.sub(r"[^\d]", "", cleaned_text)
@@ -226,61 +182,85 @@ def check_turn():
 
 
 # Check year
-def check_current_year():
-    year = enhanced_screenshot(constants.YEAR_REGION)
-    text = extract_text(year)
+def check_current_year(state: GlobalState, existing_screen=None):
+    existing_screen = ensure_screenshot(state, state.data.region.YEAR_REGION, existing_screen)
+    cv2.imwrite("debug/year.png", existing_screen)
+    # Original implementation bumped the contrast here to make OCR more reliable
+    existing_screen = cv2.convertScaleAbs(existing_screen, alpha=1.5, beta=0)
+    text = extract_text(existing_screen)
     return text
 
 
 # Check criteria
-def check_criteria():
-    img = enhanced_screenshot(constants.CRITERIA_REGION)
-    text = extract_text(img)
+def check_criteria(state: GlobalState, existing_screen=None):
+    existing_screen = ensure_screenshot(state, state.data.region.CRITERIA_REGION, existing_screen)
+    # Original implementation bumped the contrast here to make OCR more reliable
+    existing_screen = cv2.convertScaleAbs(existing_screen, alpha=1.5, beta=0)
+    text = extract_text(existing_screen)
     return text
 
 
-def check_criteria_detail():
-    img = enhanced_screenshot(constants.CRITERIA_DETAIL_REGION)
-    text = extract_text(img)
+def check_criteria_detail(state: GlobalState, existing_screen=None):
+    existing_screen = ensure_screenshot(state, state.data.region.CRITERIA_DETAIL_REGION, existing_screen)
+    # Original implementation bumped the contrast here to make OCR more reliable
+    existing_screen = cv2.convertScaleAbs(existing_screen, alpha=1.5, beta=0)
+    text = extract_text(existing_screen)
     return text
 
 
-def check_skill_pts():
-    img = enhanced_screenshot(constants.SKILL_PTS_REGION)
-    text = extract_number(img)
+def check_skill_pts(state: GlobalState, existing_screen=None):
+    existing_screen = ensure_screenshot(state, state.data.region.SKILL_PTS_REGION, existing_screen)
+    # Original implementation bumped the contrast here to make OCR more reliable
+    existing_screen = cv2.convertScaleAbs(existing_screen, alpha=1.5, beta=0)
+    text = extract_number(existing_screen)
     return text
 
 
-previous_right_bar_match = ""
-
-
-def check_energy_level(threshold=0.85):
+def check_energy_level(state: GlobalState, threshold=0.85):
     # find where the right side of the bar is on screen
-    global previous_right_bar_match
-    right_bar_match = match_template("assets/ui/energy_bar_right_end_part.png", constants.ENERGY_BBOX, threshold)
+
+    energy_bar_screen = state.screenshot(state.data.region.ENERGY_BBOX)
+    # cv2.imwrite("debug/energy.png", energy_bar_screen)
+
+    right_bar_template = state.asset_by_path("assets/ui/energy_bar_right_end_part.png")
+    right_bar_match = match_template(right_bar_template, energy_bar_screen, threshold)
     # longer energy bars get more round at the end
     if not right_bar_match:
-        right_bar_match = match_template("assets/ui/energy_bar_right_end_part_2.png", constants.ENERGY_BBOX, threshold)
+        right_bar_template_2 = state.asset_by_path("assets/ui/energy_bar_right_end_part_2.png")
+        right_bar_match = match_template(right_bar_template_2, energy_bar_screen, threshold)
 
-    if right_bar_match:
-        x, y, w, h = right_bar_match[0]
-        energy_bar_length = x
+    left_bar_template = state.asset_by_path("assets/ui/energy_bar_left_end_part.png")
+    left_bar_match = match_template(left_bar_template, energy_bar_screen, threshold)
 
-        x, y, w, h = constants.ENERGY_BBOX
-        top_bottom_middle_pixel = round((y + h) / 2, 0)
+    if right_bar_match and left_bar_match:
+        # Can sometimes clip the mood bar, so if that happens we'll choose the leftmost one
+        if len(left_bar_match) > 1:
+            info(f"Foudn multiple left bar matches: {left_bar_match}")
+            left_bar_match = min(left_bar_match, key=lambda box: box[0])
+        else:
+            left_bar_match = left_bar_match[0]
 
-        MAX_ENERGY_BBOX = (x, top_bottom_middle_pixel, x + energy_bar_length, top_bottom_middle_pixel + 1)
+        energy_bar_length = int(right_bar_match[0][0] - left_bar_match[0])
+
+        top_bottom_middle_pixel = left_bar_match[1] + left_bar_match[3] // 2
+
+        max_energy_bbox = (left_bar_match[0], top_bottom_middle_pixel, energy_bar_length, 1)
+        max_energy_bbox = adjust_box_for_region(max_energy_bbox, state.data.region.ENERGY_BBOX)
+        info(f"Max energy box at {max_energy_bbox}")
 
         # [117,117,117] is gray for missing energy, region templating for this one is a problem, so we do this
-        empty_energy_pixel_count = count_pixels_of_color([117, 117, 117], MAX_ENERGY_BBOX)
+        max_energy_screen = state.screenshot(max_energy_bbox)
+        cv2.imwrite("debug/max_energy.png", max_energy_screen)
+        empty_energy_pixel_count = count_pixels_of_color([117, 117, 117], max_energy_screen)
 
         # use the energy_bar_length (a few extra pixels from the outside are remaining so we subtract that)
         total_energy_length = energy_bar_length - 1
-        hundred_energy_pixel_constant = (
-            236  # counted pixels from one end of the bar to the other, should be fine since we're working in only 1080p
-        )
+        # counted pixels from one end of the bar to the other
+        hundred_energy_pixel_constant = scale_value_for_screen_height(
+            468, state.game_window.height
+        )  # 4k baseline is 468 pixels
 
-        previous_right_bar_match = right_bar_match
+        state.memo.previous_right_bar_match = right_bar_match
 
         energy_level = ((total_energy_length - empty_energy_pixel_count) / hundred_energy_pixel_constant) * 100
         info(
@@ -290,15 +270,18 @@ def check_energy_level(threshold=0.85):
         max_energy = total_energy_length / hundred_energy_pixel_constant * 100
         return energy_level, max_energy
     else:
-        warning(f"Couldn't find energy bar, returning -1")
+        warning("Couldn't find energy bar, returning -1")
+        warning(f"Left box: {left_bar_match}, Right box: {right_bar_match}")
         return -1, -1
 
 
-def get_race_type():
-    race_info_screen = enhanced_screenshot(constants.RACE_INFO_TEXT_REGION)
-    race_info_text = extract_text(race_info_screen)
-    debug(f"Race info text: {race_info_text}")
-    return race_info_text
+def get_race_type(state: GlobalState, existing_screen=None):
+    existing_screen = ensure_screenshot(state, state.data.region.RACE_INFO_TEXT_REGION, existing_screen)
+    # Original implementation bumped the contrast here to make OCR more reliable
+    existing_screen = cv2.convertScaleAbs(existing_screen, alpha=1.5, beta=0)
+    text = extract_text(existing_screen)
+    debug(f"Race info text: {text}")
+    return text
 
 
 # Severity -> 0 is doesn't matter / incurable, 1 is "can be ignored for a few turns", 2 is "must be cured immediately"
@@ -327,7 +310,10 @@ BAD_STATUS_EFFECTS = {
         "Severity": 2,
         "Effect": "Character cannot gain Speed from speed training.",
     },
-    "Under the Weather": {"Severity": 0, "Effect": "Increases chance of training failure by 5%"},
+    "Under the Weather": {
+        "Severity": 0,
+        "Effect": "Increases chance of training failure by 5%",
+    },
 }
 
 GOOD_STATUS_EFFECTS = {
@@ -339,15 +325,15 @@ GOOD_STATUS_EFFECTS = {
 }
 
 
-def check_status_effects():
-    status_effects_screen = enhanced_screenshot(constants.FULL_STATS_STATUS_REGION)
-
-    screen = np.array(status_effects_screen)  # currently grayscale
-    screen = cv2.cvtColor(screen, cv2.COLOR_GRAY2BGR)  # convert to 3-channel BGR for display
+def check_status_effects(state: GlobalState, existing_screen=None):
+    existing_screen = ensure_screenshot(state, state.data.region.FULL_STATS_STATUS_REGION, existing_screen)
+    # Original implementation bumped the contrast here to make OCR more reliable
+    existing_screen = cv2.convertScaleAbs(existing_screen, alpha=1.5, beta=0)
+    cv2.imwrite("debug/status.png", existing_screen)
 
     # debug_window(screen)
 
-    status_effects_text = extract_text(status_effects_screen)
+    status_effects_text = extract_text(existing_screen, allowlist=ascii_letters)
     debug(f"Status effects text: {status_effects_text}")
 
     normalized_text = status_effects_text.lower().replace(" ", "")
@@ -360,15 +346,10 @@ def check_status_effects():
     return matches, total_severity
 
 
-APTITUDES = {}
+def check_aptitudes(state: GlobalState, existing_screen=None):
 
-
-def check_aptitudes():
-    global APTITUDES
-
-    image = capture_region(constants.FULL_STATS_APTITUDE_REGION)
-    image = np.array(image)
-    h, w = image.shape[:2]
+    existing_screen = ensure_screenshot(state, state.data.region.FULL_STATS_APTITUDE_REGION, existing_screen)
+    h, w = existing_screen.shape[:2]
 
     # Ratios for each aptitude box (x, y, width, height) in percentages
     boxes = {
@@ -385,27 +366,27 @@ def check_aptitudes():
     }
 
     aptitude_images = {
-        "a": "assets/ui/aptitude_a.png",
-        "b": "assets/ui/aptitude_b.png",
-        "c": "assets/ui/aptitude_c.png",
-        "d": "assets/ui/aptitude_d.png",
-        "e": "assets/ui/aptitude_e.png",
-        "f": "assets/ui/aptitude_f.png",
-        "g": "assets/ui/aptitude_g.png",
+        "a": state.asset_by_path("assets/ui/aptitude_a.png"),
+        "b": state.asset_by_path("assets/ui/aptitude_b.png"),
+        "c": state.asset_by_path("assets/ui/aptitude_c.png"),
+        "d": state.asset_by_path("assets/ui/aptitude_d.png"),
+        "e": state.asset_by_path("assets/ui/aptitude_e.png"),
+        "f": state.asset_by_path("assets/ui/aptitude_f.png"),
+        "g": state.asset_by_path("assets/ui/aptitude_g.png"),
     }
 
     crops = {}
     for key, (xr, yr, wr, hr) in boxes.items():
         x, y, ww, hh = int(xr * w), int(yr * h), int(wr * w), int(hr * h)
-        cropped_image = np.array(image[y : y + hh, x : x + ww])
+        cropped_image = np.array(existing_screen[y : y + hh, x : x + ww])
         matches = multi_match_templates(aptitude_images, cropped_image)
         for name, match in matches.items():
             if match:
-                APTITUDES[key] = name
+                state.memo.aptitudes[key] = name
                 # debug_window(cropped_image)
 
     info(
-        f"Parsed aptitude values: {APTITUDES}. If these values are wrong, please stop and start the bot again with the hotkey."
+        f"Parsed aptitude values: {state.memo.aptitudes}. If these values are wrong, please stop and start the bot again with the hotkey."
     )
 
 

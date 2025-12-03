@@ -1,0 +1,164 @@
+{
+    "MOOD_REGION": {
+        "x1": 1410,
+        "y1": 250,
+        "x2": 1670,
+        "y2": 300
+    },
+    "TURN_REGION": {
+        "x1": 520,
+        "y1": 130,
+        "x2": 740,
+        "y2": 280
+    },
+    "FAILURE_REGION": {
+        "x1": 500,
+        "y1": 1540,
+        "x2": 1620,
+        "y2": 1670
+    },
+    "YEAR_REGION": {
+        "x1": 510,
+        "y1": 70,
+        "x2": 840,
+        "y2": 120
+    },
+    "CRITERIA_REGION": {
+        "x1": 910,
+        "y1": 110,
+        "x2": 1530,
+        "y2": 230
+    },
+    "EVENT_NAME_REGION": {
+        "x1": 482,
+        "y1": 410,
+        "x2": 1212,
+        "y2": 470
+    },
+    "SKILL_PTS_REGION": {
+        "x1": 1520,
+        "y1": 1560,
+        "x2": 1650,
+        "y2": 1630
+    },
+    "SKIP_BTN_BIG_REGION_LANDSCAPE": {
+        "x1": 3000,
+        "y1": 1500,
+        "x2": 3840,
+        "y2": 2160
+    },
+    "SCREEN_BOTTOM_REGION": {
+        "x1": 250,
+        "y1": 1600,
+        "x2": 2000,
+        "y2": 2160
+    },
+    "SCREEN_MIDDLE_REGION": {
+        "x1": 250,
+        "y1": 600,
+        "x2": 2000,
+        "y2": 1600
+    },
+    "SCREEN_TOP_REGION": {
+        "x1": 250,
+        "y1": 0,
+        "x2": 2000,
+        "y2": 600
+    },
+    "RACE_INFO_TEXT_REGION": {
+        "x1": 570,
+        "y1": 670,
+        "x2": 1620,
+        "y2": 740
+    },
+    "RACE_LIST_BOX_REGION": {
+        "x1": 520,
+        "y1": 1160,
+        "x2": 1690,
+        "y2": 1740
+    },
+    "FULL_STATS_STATUS_REGION": {
+        "x1": 530,
+        "y1": 1150,
+        "x2": 1690,
+        "y2": 1880
+    },
+    "FULL_STATS_APTITUDE_REGION": {
+        "x1": 790,
+        "y1": 680,
+        "x2": 1640,
+        "y2": 880
+    },
+    "SUPPORT_CARD_ICON_BBOX": {
+        "x1": 1690,
+        "y1": 310,
+        "x2": 1890,
+        "y2": 1400
+    },
+    "ENERGY_BBOX": {
+        "x1": 870,
+        "y1": 234,
+        "x2": 1430,
+        "y2": 312
+    },
+    "RACE_BUTTON_IN_RACE_BBOX_LANDSCAPE": {
+        "x1": 1600,
+        "y1": 1900,
+        "x2": 2300,
+        "y2": 2100
+    },
+    "GAME_SCREEN_REGION": {
+        "x1": 300,
+        "y1": 0,
+        "x2": 1600,
+        "y2": 2160
+    },
+    "SKILL_NAME_OFFSET": {
+        "x1": -840,
+        "y1": -80,
+        "x2": 550,
+        "y2": 10
+    },
+    "SPD_STAT_REGION": {
+        "x1": 620,
+        "y1": 1446,
+        "x2": 730,
+        "y2": 1486
+    },
+    "STA_STAT_REGION": {
+        "x1": 810,
+        "y1": 1446,
+        "x2": 920,
+        "y2": 1486
+    },
+    "PWR_STAT_REGION": {
+        "x1": 1000,
+        "y1": 1446,
+        "x2": 1110,
+        "y2": 1486
+    },
+    "GUTS_STAT_REGION": {
+        "x1": 1190,
+        "y1": 1446,
+        "x2": 1300,
+        "y2": 1486
+    },
+    "WIT_STAT_REGION": {
+        "x1": 1380,
+        "y1": 1446,
+        "x2": 1490,
+        "y2": 1486
+    },
+    "SCROLLING_SELECTION_MOUSE_POS": {
+        "x": 1120,
+        "y": 1360
+    },
+    "SKILL_SCROLL_BOTTOM_MOUSE_POS": {
+        "x": 1120,
+        "y": 1700
+    },
+    "RACE_SCROLL_BOTTOM_MOUSE_POS": {
+        "x": 1120,
+        "y": 1700
+    }
+}

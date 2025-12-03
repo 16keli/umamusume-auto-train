@@ -1,17 +1,10 @@
 import cv2
 import numpy as np
-from PIL import ImageGrab, ImageStat
-
-from utils.screenshot import capture_region
 
 
-def match_template(template_path, region=None, threshold=0.85):
+def match_template(template, screen, threshold=0.85):
     # Get screenshot
-    if region:
-        screen = np.array(ImageGrab.grab(bbox=region))  # (left, top, right, bottom)
-    else:
-        screen = np.array(ImageGrab.grab())
-    screen = cv2.cvtColor(screen, cv2.COLOR_RGB2BGR)
+    screen = cv2.cvtColor(screen, cv2.COLOR_RGB2GRAY)
 
     #  cv2.namedWindow("image")
     #  cv2.moveWindow("image", -900, 0)
@@ -19,9 +12,7 @@ def match_template(template_path, region=None, threshold=0.85):
     #  cv2.waitKey(5)
 
     # Load template
-    template = cv2.imread(template_path, cv2.IMREAD_COLOR)  # safe default
-    if template.shape[2] == 4:
-        template = cv2.cvtColor(template, cv2.COLOR_BGRA2BGR)
+    template = cv2.cvtColor(template, cv2.COLOR_RGB2GRAY)
     result = cv2.matchTemplate(screen, template, cv2.TM_CCOEFF_NORMED)
     loc = np.where(result >= threshold)
 
@@ -31,19 +22,19 @@ def match_template(template_path, region=None, threshold=0.85):
     return deduplicate_boxes(boxes)
 
 
-def multi_match_templates(templates, screen=None, threshold=0.85):
-    if screen is None:
-        screen = ImageGrab.grab()
-    screen_bgr = cv2.cvtColor(np.array(screen), cv2.COLOR_RGB2BGR)
+def multi_match_templates(templates, screen, threshold=0.85):
+    screen_bgr = cv2.cvtColor(screen, cv2.COLOR_RGB2GRAY)
+
+    cv2.imwrite("debug/screen.png", screen_bgr)
 
     results = {}
-    for name, path in templates.items():
-        template = cv2.imread(path, cv2.IMREAD_COLOR)
+    for name, template in templates.items():
         if template is None:
             results[name] = []
             continue
-        if template.shape[2] == 4:
-            template = cv2.cvtColor(template, cv2.COLOR_BGRA2BGR)
+        template = cv2.cvtColor(template, cv2.COLOR_RGB2GRAY)
+
+        cv2.imwrite(f"debug/template_{name}.png", template)
 
         result = cv2.matchTemplate(screen_bgr, template, cv2.TM_CCOEFF_NORMED)
         loc = np.where(result >= threshold)
@@ -64,21 +55,18 @@ def deduplicate_boxes(boxes, min_dist=5):
     return filtered
 
 
-def is_btn_active(region, treshold=150):
-    screenshot = capture_region(region)
-    grayscale = screenshot.convert("L")
-    stat = ImageStat.Stat(grayscale)
-    avg_brightness = stat.mean[0]
+def is_btn_active(screen, threshold=150):
+    grayscale = cv2.cvtColor(screen, cv2.COLOR_RGB2GRAY)
+    stat = cv2.mean(grayscale)
+    avg_brightness = stat[0]
 
     # Treshold btn
-    return avg_brightness > treshold
+    return avg_brightness > threshold
 
 
-def count_pixels_of_color(color_rgb=[117, 117, 117], region=None, tolerance=2):
+def count_pixels_of_color(color_rgb=[117, 117, 117], screen=None, tolerance=2):
     # [117,117,117] is gray for missing energy, we go 2 below and 2 above so that it's more stable in recognition
-    if region:
-        screen = np.array(ImageGrab.grab(bbox=region))  # (left, top, right, bottom)
-    else:
+    if screen is None:
         return -1
 
     color = np.array(color_rgb, np.uint8)
@@ -90,16 +78,6 @@ def count_pixels_of_color(color_rgb=[117, 117, 117], region=None, tolerance=2):
     dst = cv2.inRange(screen, color_min, color_max)
     pixel_count = cv2.countNonZero(dst)
     return pixel_count
-
-
-def find_color_of_pixel(region=None):
-    if region:
-        # we can only return one pixel's color here, so we take the x, y and add 1 to them
-        region = (region[0], region[1], region[0] + 1, region[1] + 1)
-        screen = np.array(ImageGrab.grab(bbox=region))  # (left, top, right, bottom)
-        return screen[0]
-    else:
-        return -1
 
 
 def closest_color(color_dict, target_color):
